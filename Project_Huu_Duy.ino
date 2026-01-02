@@ -60,6 +60,7 @@ int8_t speed;
 int8_t hour, minute, second;
 int16_t distance;
 bool is_button_encoder_hold = false;
+volatile bool stop_request = false;
 
 uint8_t handleButton(uint8_t pin)
 {
@@ -173,9 +174,7 @@ void updateEncoder(){
 }
 
 void Stop_System(){
-  motor1.disable();
-  motor2.disable();
-  system_start = false;
+  stop_request = true;
 }
 
 void process_system(){
@@ -186,6 +185,7 @@ void process_system(){
     }else if(button == BUTTON_ENCODER){
       if(is_button_encoder_hold){
         mode = MENU;
+        is_button_encoder_hold = false;
       }else{
         switch(mode){
           case MENU:
@@ -340,6 +340,12 @@ void setup() {
 }
 
 void loop() {
+  if(stop_request){
+    motor1.disable();
+    motor2.disable();
+    system_start = false;
+    stop_request = false;
+  }
   process_system();
   process_active();
   display_system();
