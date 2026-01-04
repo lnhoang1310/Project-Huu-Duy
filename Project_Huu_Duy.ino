@@ -6,17 +6,17 @@
 #define BUTTON_STOP    7
 #define BUTTON_ENCODER 12
 
-#define ENCODER_A 2
-#define ENCODER_B 8
+#define ENCODER_A 2    // phaA
+#define ENCODER_B 8    // phaB
 
-// Chân mới theo hardware toggle
+// Chân motor theo hardware toggle
 #define PUL1  9   // Timer1 - OC1A
 #define DIR1  11
 #define ENA1  4
 
 #define PUL2  3   // Timer2 - OC2B
 #define DIR2  10
-#define ENA2  9   // đổi để tránh trùng pin 9
+#define ENA2  5   // Đổi lại để tránh trùng chân 9 nếu cần
 
 #define BTN_NONE  0
 #define BTN_CLICK 1
@@ -28,10 +28,10 @@
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-StepperMotor motor1(PUL1, DIR1, ENA1, 1); // Timer1
-StepperMotor motor2(PUL2, DIR2, ENA2, 2); // Timer2
+StepperMotor motor1(PUL1, DIR1, ENA1, 1);
+StepperMotor motor2(PUL2, DIR2, ENA2, 2);
 
-typedef enum { MOTOR_1, MOTOR_2, MENU } Display_Mode;
+typedef enum { MENU, MOTOR_1, MOTOR_2 } Display_Mode;
 Display_Mode mode = MENU;
 
 typedef enum { MENU_MOTOR_1, MENU_MOTOR_2 } Choosen_Menu;
@@ -43,11 +43,24 @@ Choosen_Motor_1 choosen_motor_1 = MOTOR1_SAVE;
 typedef enum { MOTOR2_TIME, MOTOR2_SPEED, MOTOR2_SAVE } Choosen_Motor_2;
 Choosen_Motor_2 choosen_motor_2 = MOTOR2_SAVE;
 
-int8_t speed = 3;          // mặc định level 3/5
+int8_t speed_level = 3;     // 0..5
 int8_t hour = 0, minute = 0, second = 10;
 int16_t distance = 5;
+
 bool is_button_encoder_hold = false;
 bool stop_request = false;
+bool system_start = false;
+
+// Biến cho encoder (giống code bạn cung cấp)
+uint8_t phaA_last = HIGH;
+
+// Biến trạng thái menu
+uint8_t demtong = 0;           // đếm tổng menu (0: màn hình chính, 1: menu tổng, 2: chọn motor, 3: vào chi tiết)
+uint8_t demmenu1 = 0;
+uint8_t demmenu2 = 0;
+int8_t congtru_tong = 0;
+int8_t congtru_menu1 = 0;
+int8_t congtru_menu2 = 0;
 
 uint8_t handleButton(uint8_t pin) {
   static uint32_t lastDebounce[20] = {0};
@@ -100,20 +113,7 @@ uint8_t button_handle() {
   return 0;
 }
 
-// Encoder polling
-int32_t encoder_count = 0;
-static uint8_t last_A = HIGH;
-
-void updateEncoderPolling() {
-  uint8_t curr_A = digitalRead(ENCODER_A);
-  if (last_A == HIGH && curr_A == LOW) { // cạnh xuống của A
-    if (digitalRead(ENCODER_B) == HIGH) encoder_count++;
-    else encoder_count--;
-  }
-  last_A = curr_A;
-}
-
-// Hiển thị
+// Hiển thị các màn hình
 void display_welcome() {
   lcd.setCursor(0, 0); lcd.print("Huu Duy        ");
   lcd.setCursor(0, 1); lcd.print("May Khuay 2025 ");
@@ -134,21 +134,19 @@ void display_detail_motor_1() {
 }
 
 void display_detail_motor_2() {
-  lcd.setCursor(1, 0); lcd.print("Speed: "); lcd.print(speed); lcd.print("   ");
-  lcd.setCursor(1, 1); lcd.print("Time : ");
-  lcd.print(hour < 10 ? "0" : ""); lcd.print(hour); lcd.print(":");
-  lcd.print(minute < 10 ? "0" : ""); lcd.print(minute); lcd.print(":");
-  lcd.print(second < 10 ? "0" : ""); lcd.print(second);
-
-  if (choosen_motor_2 != MOTOR2_SAVE) {
-    lcd.setCursor(0, choosen_motor_2 == MOTOR2_SPEED ? 0 : 1); lcd.print(">");
-    lcd.setCursor(0, choosen_motor_2 == MOTOR2_SPEED ? 1 : 0); lcd.print(" ");
-  }
+  lcd.setCursor(0, 0); lcd.print("Speed: "); lcd.print(speed_level); lcd.print("   ");
+  lcd.setCursor(0, 1); lcd.print("Time : ");
+  if (hour < 10) lcd.print("0"); lcd.print(hour); lcd.print(":");
+  if (minute < 10) lcd.print("0"); lcd.print(minute); lcd.print(":");
+  if (second < 10) lcd.print("0"); lcd.print(second);
 }
 
 void display_system() {
   static Display_Mode last_mode = (Display_Mode)-1;
-  if (mode != last_mode) { lcd.clear(); last_mode = mode; }
+  if (mode != last_mode) {
+    lcd.clear();
+    last_mode = mode;
+  }
 
   switch (mode) {
     case MENU: display_menu(); break;
@@ -157,74 +155,65 @@ void display_system() {
   }
 }
 
+void process_encoder() {
+  uint8_t gtphaA = digitalRead(ENCODER_A);
 
-bool system_start = false;
-
-void process_system() {
-  uint8_t btn = button_handle();
-
-  if (btn != 0) {
-    if (btn == BUTTON_START) system_start = true;
-    else if (btn == BUTTON_ENCODER) {
-      if (is_button_encoder_hold) {
-        mode = MENU;
-        is_button_encoder_hold = false;
-      } else {
-        switch (mode) {
-          case MENU:
-            mode = (choosen_menu == MENU_MOTOR_1) ? MOTOR_1 : MOTOR_2;
-            break;
-          case MOTOR_1:
-            if (choosen_motor_1 == MOTOR1_SAVE) choosen_motor_1 = MOTOR1_DISTANCE;
-            else {
-              motor1.distance = distance;
-              choosen_motor_1 = MOTOR1_SAVE;
+  if ((phaA_last == LOW) && (gtphaA == HIGH)) {  // Phát hiện cạnh lên của phaA
+    if (digitalRead(ENCODER_B) == LOW) {  // + xoay cùng chiều (tăng)
+      if (mode == MENU) {
+        choosen_menu = (choosen_menu == MENU_MOTOR_1) ? MENU_MOTOR_2 : MENU_MOTOR_1;
+      }
+      else if (mode == MOTOR_1 && choosen_motor_1 == MOTOR1_DISTANCE) {
+        distance++;
+        if (distance > 20) distance = 0;
+      }
+      else if (mode == MOTOR_2) {
+        if (choosen_motor_2 == MOTOR2_SPEED) {
+          speed_level++;
+          if (speed_level > 5) speed_level = 0;
+        }
+        else if (choosen_motor_2 == MOTOR2_TIME) {
+          second++;
+          if (second >= 60) {
+            second = 0;
+            minute++;
+            if (minute >= 60) {
+              minute = 0;
+              hour++;
             }
-            break;
-          case MOTOR_2:
-            if (choosen_motor_2 == MOTOR2_SPEED) {
-              motor2.speed_rpm = MAX_SPEED_RPM * speed / 5.0f;
-              choosen_motor_2 = MOTOR2_TIME;
-            } else if (choosen_motor_2 == MOTOR2_TIME) {
-              motor2.time_run = hour * 3600UL + minute * 60UL + second;
-              choosen_motor_2 = MOTOR2_SAVE;
-            } else choosen_motor_2 = MOTOR2_SPEED;
-            break;
+          }
         }
       }
     }
-    encoder_count = 0;
-  }
-
-  // Encoder với gia tốc nhẹ
-  if (encoder_count != 0) {
-    int32_t delta = encoder_count > 0 ? 1 : -1;
-    int32_t abs_c = abs(encoder_count);
-    if (abs_c >= 6) delta *= 5;
-    else if (abs_c >= 3) delta *= 3;
-
-    switch (mode) {
-      case MENU:
-        choosen_menu = (delta > 0) ? MENU_MOTOR_1 : MENU_MOTOR_2;
-        break;
-      case MOTOR_1:
-        if (choosen_motor_1 == MOTOR1_DISTANCE)
-          distance = constrain(distance + delta, 0, 20);
-        break;
-      case MOTOR_2:
+    else {  // - xoay ngược chiều (giảm)
+      if (mode == MENU) {
+        choosen_menu = (choosen_menu == MENU_MOTOR_1) ? MENU_MOTOR_2 : MENU_MOTOR_1;
+      }
+      else if (mode == MOTOR_1 && choosen_motor_1 == MOTOR1_DISTANCE) {
+        distance--;
+        if (distance < 0) distance = 20;
+      }
+      else if (mode == MOTOR_2) {
         if (choosen_motor_2 == MOTOR2_SPEED) {
-          speed = constrain(speed + (delta > 0 ? 1 : -1), 0, 5);
-        } else if (choosen_motor_2 == MOTOR2_TIME) {
-          int32_t total = hour * 3600L + minute * 60L + second + delta * 5;
-          total = constrain(total, 0, 359999);
-          hour   = total / 3600;
-          minute = (total % 3600) / 60;
-          second = total % 60;
+          speed_level--;
+          if (speed_level < 0) speed_level = 5;
         }
-        break;
+        else if (choosen_motor_2 == MOTOR2_TIME) {
+          second--;
+          if (second < 0) {
+            second = 59;
+            if (minute > 0) {
+              minute--;
+            } else if (hour > 0) {
+              minute = 59;
+              hour--;
+            }
+          }
+        }
+      }
     }
-    encoder_count = 0;
   }
+  phaA_last = gtphaA;
 }
 
 void process_active() {
@@ -233,16 +222,16 @@ void process_active() {
     if (step == 0) {
       motor1.setDirection(FORWARD);
       motor1.setSpeedRPM(200);
-      motor1.moveSteps(motor1.distance * STEP_PER_ROUND / DISTANCE_PER_ROUND);
+      motor1.moveSteps((uint32_t)(distance * STEP_PER_ROUND / DISTANCE_PER_ROUND));
       step = 1;
     }
     if (step == 1 && motor1.state == INACTIVE) {
-      motor2.rotate(motor2.speed_rpm, motor2.time_run);
+      motor2.rotate(MAX_SPEED_RPM * speed_level / 5.0f, hour*3600UL + minute*60UL + second);
       step = 2;
     }
     if (step == 2 && motor2.state == INACTIVE) {
       motor1.setDirection(BACKWARD);
-      motor1.moveSteps(motor1.distance * STEP_PER_ROUND / DISTANCE_PER_ROUND);
+      motor1.moveSteps((uint32_t)(distance * STEP_PER_ROUND / DISTANCE_PER_ROUND));
       step = 3;
     }
     if (step == 3 && motor1.state == INACTIVE) {
@@ -253,11 +242,11 @@ void process_active() {
 }
 
 void setup() {
-  pinMode(BUTTON_START, INPUT_PULLUP);
-  pinMode(BUTTON_STOP, INPUT_PULLUP);
+  pinMode(BUTTON_START,   INPUT_PULLUP);
+  pinMode(BUTTON_STOP,    INPUT_PULLUP);
   pinMode(BUTTON_ENCODER, INPUT_PULLUP);
-  pinMode(ENCODER_A, INPUT_PULLUP);
-  pinMode(ENCODER_B, INPUT_PULLUP);
+  pinMode(ENCODER_A,      INPUT_PULLUP);
+  pinMode(ENCODER_B,      INPUT_PULLUP);
 
   Wire.begin();
   lcd.begin(16, 2);
@@ -277,17 +266,56 @@ void loop() {
     stop_request = false;
   }
 
-  updateEncoderPolling();
-  process_system();
-  process_active();
+  // Xử lý encoder theo cách bạn cung cấp
+  process_encoder();
 
-  // Kiểm tra thời gian chạy của motor2 (rotate theo thời gian)
+  // Xử lý nút bấm
+  uint8_t btn = button_handle();
+
+  if (btn != 0) {
+    if (btn == BUTTON_START) {
+      system_start = true;
+    }
+    else if (btn == BUTTON_ENCODER) {
+      if (is_button_encoder_hold) {
+        mode = MENU;
+        is_button_encoder_hold = false;
+      } else {
+        switch (mode) {
+          case MENU:
+            mode = (choosen_menu == MENU_MOTOR_1) ? MOTOR_1 : MOTOR_2;
+            break;
+          case MOTOR_1:
+            if (choosen_motor_1 == MOTOR1_SAVE) {
+              choosen_motor_1 = MOTOR1_DISTANCE;
+            } else {
+              // Lưu distance nếu cần
+              choosen_motor_1 = MOTOR1_SAVE;
+            }
+            break;
+          case MOTOR_2:
+            if (choosen_motor_2 == MOTOR2_SPEED) {
+              choosen_motor_2 = MOTOR2_TIME;
+            } else if (choosen_motor_2 == MOTOR2_TIME) {
+              choosen_motor_2 = MOTOR2_SAVE;
+            } else {
+              choosen_motor_2 = MOTOR2_SPEED;
+            }
+            break;
+        }
+      }
+    }
+  }
+
+  // Kiểm tra thời gian chạy motor2
   if (motor2.state == ACTIVE && motor2.time_run > 0) {
     if (millis() - motor2.start_time >= motor2.time_run * 1000UL) {
       motor2.disable();
     }
   }
 
+  process_active();
   display_system();
-  delay(10);
+
+  delay(5);  // Giảm delay để encoder nhạy hơn
 }
