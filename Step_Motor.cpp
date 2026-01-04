@@ -1,20 +1,25 @@
 #include "Step_Motor.h"
 #include <avr/io.h>
-#include <avr/interrupt.h>
-
-#define F_CPU 16000000UL
 
 StepperMotor* motorTimer1 = nullptr;
+StepperMotor* motorTimer2 = nullptr;
+
+// ISR chỉ đếm bước và dừng khi đủ bước (rất nhẹ)
 ISR(TIMER1_COMPA_vect) {
     if (motorTimer1 && motorTimer1->state == ACTIVE) {
-        motorTimer1->handleStepPulse();
+        motorTimer1->step_count++;
+        if (motorTimer1->target_steps > 0 && motorTimer1->step_count >= motorTimer1->target_steps) {
+            motorTimer1->disable();
+        }
     }
 }
 
-StepperMotor* motorTimer2 = nullptr;
 ISR(TIMER2_COMPA_vect) {
     if (motorTimer2 && motorTimer2->state == ACTIVE) {
-        motorTimer2->handleStepPulse();
+        motorTimer2->step_count++;
+        if (motorTimer2->target_steps > 0 && motorTimer2->step_count >= motorTimer2->target_steps) {
+            motorTimer2->disable();
+        }
     }
 }
 
@@ -22,21 +27,12 @@ StepperMotor::StepperMotor(uint8_t stepPin, uint8_t dirPin, uint8_t enPin, uint8
     step_pin = stepPin;
     dir_pin = dirPin;
     en_pin = enPin;
+    timer_number = timerNum;
 
     pinMode(step_pin, OUTPUT);
     pinMode(dir_pin, OUTPUT);
     pinMode(en_pin, OUTPUT);
-    digitalWrite(en_pin, HIGH);
-
-    speed_rpm = 60;
-    steps_per_rev = 200;
-    target_steps = 0;
-    direction = FORWARD;
-    state = INACTIVE;
-    step_count = 0;
-    timer_number = timerNum;
-    time_run = 0;
-    start_time = 0;
+    digitalWrite(en_pin, HIGH); // disable ban đầu
 
     if (timer_number == 1) motorTimer1 = this;
     else if (timer_number == 2) motorTimer2 = this;
@@ -44,10 +40,14 @@ StepperMotor::StepperMotor(uint8_t stepPin, uint8_t dirPin, uint8_t enPin, uint8
 
 void StepperMotor::enable() {
     digitalWrite(en_pin, LOW);
+    step_count = 0;
+    if (time_run > 0) start_time = millis();
+    startTimer();
     state = ACTIVE;
 }
 
 void StepperMotor::disable() {
+    stopTimer();
     digitalWrite(en_pin, HIGH);
     state = INACTIVE;
 }
@@ -60,69 +60,86 @@ void StepperMotor::setDirection(Direct_State dir) {
 void StepperMotor::setSpeedRPM(float rpm) {
     if (rpm < 0.1f) rpm = 0.1f;
     speed_rpm = rpm;
+    if (state == ACTIVE) startTimer(); // cập nhật tần số ngay
+}
 
-    float step_freq = (speed_rpm * steps_per_rev) / 60.0f; // Hz
-    uint32_t ocr;
+void StepperMotor::startTimer() {
+    float step_freq = (speed_rpm * steps_per_rev) / 60.0f;
+    if (step_freq < 0.1f) step_freq = 0.1f;
 
-    if (timer_number == 1) {
-        uint32_t prescaler = 1;
-        uint32_t ocr_temp = (F_CPU / (2 * prescaler * step_freq)) - 1;
-        if (ocr_temp > 65535) { prescaler = 8; ocr_temp = (F_CPU / (2 * prescaler * step_freq)) - 1; }
-        if (ocr_temp > 65535) { prescaler = 64; ocr_temp = (F_CPU / (2 * prescaler * step_freq)) - 1; }
-        ocr = ocr_temp;
-        TCCR1A = 0;
-        TCCR1B = 0;
-        TCCR1B |= (1 << WGM12);
-        if (prescaler == 1) TCCR1B |= (1 << CS10);
-        else if (prescaler == 8) TCCR1B |= (1 << CS11);
-        else if (prescaler == 64) TCCR1B |= (1 << CS11) | (1 << CS10);
+    uint32_t ocr = 0;
+    uint8_t prescaler_bits = 0;
+
+    if (timer_number == 1) { // Timer1 - OC1A (pin 9)
+        uint32_t temp = (16000000UL / step_freq) - 1;
+        if (temp <= 65535) {
+            ocr = temp;
+            prescaler_bits = (1 << CS10); // prescaler 1
+        } else if ((temp = (16000000UL / 8 / step_freq) - 1) <= 65535) {
+            ocr = temp;
+            prescaler_bits = (1 << CS11); // 8
+        } else {
+            temp = (16000000UL / 64 / step_freq) - 1;
+            ocr = (temp > 65535) ? 65535 : temp;
+            prescaler_bits = (1 << CS11) | (1 << CS10); // 64
+        }
+
+        TCCR1A = (1 << COM1A0);              // Toggle OC1A on compare match
+        TCCR1B = (1 << WGM12) | prescaler_bits; // CTC mode + start
         OCR1A = ocr;
-        TIMSK1 |= (1 << OCIE1A);
+        TIMSK1 |= (1 << OCIE1A);              // enable interrupt để đếm bước
     } 
-    else if (timer_number == 2) {
-        uint32_t prescaler = 1;
-        uint32_t ocr_temp = (F_CPU / (2 * prescaler * step_freq)) - 1;
-        if (ocr_temp > 255) { prescaler = 8; ocr_temp = (F_CPU / (2 * prescaler * step_freq)) - 1; }
-        if (ocr_temp > 255) { prescaler = 32; ocr_temp = (F_CPU / (2 * prescaler * step_freq)) - 1; }
-        if (ocr_temp > 255) { prescaler = 64; ocr_temp = (F_CPU / (2 * prescaler * step_freq)) - 1; }
-        if (ocr_temp > 255) { prescaler = 128; ocr_temp = (F_CPU / (2 * prescaler * step_freq)) - 1; }
-        if (ocr_temp > 255) { prescaler = 256; ocr_temp = (F_CPU / (2 * prescaler * step_freq)) - 1; }
-        if (ocr_temp > 255) { prescaler = 1024; ocr_temp = (F_CPU / (2 * prescaler * step_freq)) - 1; }
-        ocr = ocr_temp;
-        TCCR2A = 0;
-        TCCR2B = 0;
-        TCCR2A |= (1 << WGM21);
-        if (prescaler == 1) TCCR2B |= (1 << CS20);
-        else if (prescaler == 8) TCCR2B |= (1 << CS21);
-        else if (prescaler == 32) TCCR2B |= (1 << CS21) | (1 << CS20);
-        else if (prescaler == 64) TCCR2B |= (1 << CS22);
-        else if (prescaler == 128) TCCR2B |= (1 << CS22) | (1 << CS20);
-        else if (prescaler == 256) TCCR2B |= (1 << CS22) | (1 << CS21);
-        else if (prescaler == 1024) TCCR2B |= (1 << CS22) | (1 << CS21) | (1 << CS20);
+    else if (timer_number == 2) { // Timer2 - OC2B (pin 3)
+        uint32_t temp = (16000000UL / step_freq) - 1;
+        if (temp <= 255) {
+            ocr = temp;
+            prescaler_bits = (1 << CS20);
+        } else if ((temp = (16000000UL / 8 / step_freq) - 1) <= 255) {
+            ocr = temp;
+            prescaler_bits = (1 << CS21);
+        } else if ((temp = (16000000UL / 32 / step_freq) - 1) <= 255) {
+            ocr = temp;
+            prescaler_bits = (1 << CS21) | (1 << CS20);
+        } else if ((temp = (16000000UL / 64 / step_freq) - 1) <= 255) {
+            ocr = temp;
+            prescaler_bits = (1 << CS22);
+        } else if ((temp = (16000000UL / 128 / step_freq) - 1) <= 255) {
+            ocr = temp;
+            prescaler_bits = (1 << CS22) | (1 << CS20);
+        } else if ((temp = (16000000UL / 256 / step_freq) - 1) <= 255) {
+            ocr = temp;
+            prescaler_bits = (1 << CS22) | (1 << CS21);
+        } else {
+            ocr = 255;
+            prescaler_bits = (1 << CS22) | (1 << CS21) | (1 << CS20); // 1024
+        }
+
+        TCCR2A = (1 << COM2B0) | (1 << WGM21); // Toggle OC2B, CTC
+        TCCR2B = prescaler_bits;
         OCR2A = ocr;
         TIMSK2 |= (1 << OCIE2A);
     }
 }
 
+void StepperMotor::stopTimer() {
+    if (timer_number == 1) {
+        TCCR1B &= ~((1 << CS11) | (1 << CS10)); // dừng clock
+        TIMSK1 &= ~(1 << OCIE1A);
+        digitalWrite(step_pin, LOW);
+    } else if (timer_number == 2) {
+        TCCR2B = 0;
+        TIMSK2 &= ~(1 << OCIE2A);
+        digitalWrite(step_pin, LOW);
+    }
+}
+
 void StepperMotor::moveSteps(uint32_t steps) {
     target_steps = steps;
-    step_count = 0;
     enable();
 }
 
 void StepperMotor::rotate(float rpm, uint32_t time_s) {
     setSpeedRPM(rpm);
     time_run = time_s;
-    start_time = millis();
     enable();
-}
-
-void StepperMotor::handleStepPulse() {
-    digitalWrite(step_pin, HIGH);
-    delayMicroseconds(2);
-    digitalWrite(step_pin, LOW);
-
-    step_count++;
-    if (target_steps > 0 && step_count >= target_steps) disable();
-    if ((millis() - start_time) >= time_run * 1000UL) disable();
 }

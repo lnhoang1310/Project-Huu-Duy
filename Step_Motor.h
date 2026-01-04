@@ -24,25 +24,27 @@ public:
     void moveSteps(uint32_t steps);
     void rotate(float rpm, uint32_t time_s = 0); // time_s = 0 → quay vô hạn
 
-    void handleStepPulse(); // gọi trong ISR
+    // Biến public để code chính đọc
+    float speed_rpm = 60.0f;
+    uint16_t steps_per_rev = 200;
+    uint32_t distance = 0;               // dùng lưu distance cho motor1
 
+    Direct_State direction = FORWARD;
+    Motor_State state = INACTIVE;
+
+    volatile uint32_t step_count = 0;
+    uint32_t target_steps = 0;
+    uint32_t time_run = 0;               // giây
+    uint32_t start_time = 0;
+
+private:
     uint8_t step_pin;
     uint8_t dir_pin;
     uint8_t en_pin;
-    
-    float speed_rpm;
-    uint16_t steps_per_rev;
-    uint32_t target_steps;
+    uint8_t timer_number;                // 1 hoặc 2
 
-    Direct_State direction;
-    Motor_State state;
-    uint32_t distance;
-
-    uint32_t time_run;       // giây
-    uint32_t start_time;     // millis()
-    uint32_t step_count;
-
-    uint8_t timer_number;    // Timer1, Timer2...
+    void startTimer();
+    void stopTimer();
 };
 
 #endif
