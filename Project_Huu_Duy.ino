@@ -134,8 +134,8 @@ void display_detail_motor_1() {
 }
 
 void display_detail_motor_2() {
-  lcd.setCursor(0, 0); lcd.print("Speed: "); lcd.print(speed); lcd.print("   ");
-  lcd.setCursor(0, 1); lcd.print("Time : ");
+  lcd.setCursor(1, 0); lcd.print("Speed: "); lcd.print(speed); lcd.print("   ");
+  lcd.setCursor(1, 1); lcd.print("Time : ");
   lcd.print(hour < 10 ? "0" : ""); lcd.print(hour); lcd.print(":");
   lcd.print(minute < 10 ? "0" : ""); lcd.print(minute); lcd.print(":");
   lcd.print(second < 10 ? "0" : ""); lcd.print(second);
